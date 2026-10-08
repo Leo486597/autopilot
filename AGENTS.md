@@ -20,6 +20,8 @@ Pick your branch:
     usage is its header
   - `prompts/*.md` — what each agent is told; `{{KEY}}` is filled from the environment
   - `template/` — the starter files `autopilot.sh init` copies into a project
+  - `.github/workflows/{triage,claude,judge}.yml` at the package root are its own callers, for its own issues: a project
+    takes its copies from `template/`, through `init`
 - The project, owned by the project
   - `.github/workflows/{triage,claude,judge}.yml` — thin callers: triggers, then `uses: Leo486597/autopilot/…@v1`
   - `.github/autopilot.env` — settings; every one and its default is listed at the top of `bin/autopilot.sh`
@@ -33,24 +35,45 @@ the "are all checks green" test.
 
 ## Set up
 
-Run from the project's root, with `gh` signed in as the owner.
+Run from the project's root, with `gh` signed in as the owner. The repo must already exist on GitHub with `origin`
+pointing at it: the script finds the repo from it. Two facts decide the rest; settle them first:
+
+- **`BASE` is the repo's default branch.** Issue, comment and judge workflows run from the default branch, and
+  `Closes #N` closes an issue only on a merge into it. PRs go into another branch: make that one the default first
+  (`gh api -X PATCH repos/<owner>/<repo> -f default_branch=<BASE>`), and tell the owner, since it changes what a clone
+  and a new PR start from
+- **Where the workflows run.** GitHub Actions, unless the repo can't use it (a private repo on an account whose Actions
+  billing is blocked) and runs a self-hosted mirror of it instead. On a mirror
+  - the variable and secrets in steps 4–5 go into the mirror's own store, not `gh variable` / `gh secret`
+  - turn GitHub Actions off for the repo (`gh api -X PUT repos/<owner>/<repo>/actions/permissions -F enabled=false`),
+    or both run every workflow
+  - runs show in the mirror's run list, not the repo's Actions tab
+  - a mirror that doesn't fill `job.workflow_sha` checks the package out at `v1`: the same code a project calling `@v1`
+    gets
 
 1. Copy the starter files:
-   `git clone --depth 1 https://github.com/Leo486597/autopilot /tmp/autopilot && /tmp/autopilot/bin/autopilot.sh init`
-   - it never overwrites; a file that already exists is left as it was, so merge it by hand
+   `PKG=$(mktemp -d)/autopilot && git clone -q --depth 1 https://github.com/Leo486597/autopilot "$PKG" && "$PKG/bin/autopilot.sh" init`
+   - it lists each file as added, or kept when one already exists; merge a kept one by hand
+   - `$PKG` is the package clone the later steps use
 2. Fill in the starter files
    - in all three workflows: `bot:` is the GitHub App's slug (step 4); in `triage.yml` and `judge.yml`, the `branches:`
-     list is the branch PRs go into
-   - `.github/autopilot.env`: `BASE` the same branch; `CHECKS_WORKFLOW` the project's CI file, if it has one
-   - `.github/labels.yml`: keep `kind:` and `priority: P0–P3` (the script ranks and sweeps by them); add the project's own
-     families. `NEEDS_LABEL` must be one of them
+     list is `BASE`
+   - `.github/autopilot.env`: `BASE`; `CHECKS_WORKFLOW` the project's CI file (no CI: leave it empty, and the judge's
+     Current check rests on mergeability alone); `AT_ONCE` lower when several projects share one self-hosted machine
+   - `.github/labels.yml`: keep `kind:` and `priority: P0–P3` (the script ranks and sweeps by them) and `NEEDS_LABEL`;
+     add families of the project's own only if it wants them
    - the owner isn't the repo owner (an org repo): add `owner: <login>` under `with:` in all three workflows
-3. Create the labels: `/tmp/autopilot/bin/autopilot.sh labels`
-4. The GitHub App the agents act as. **This is the one step that needs the owner's clicks**; ask them for it, with this list
-   - https://github.com/settings/apps/new (or the org's): any name, no webhook
-   - repository permissions: Contents, Issues, Pull requests, Workflows — Read and write; Actions, Checks, Commit
-     statuses — Read
-   - create it, generate a private key, install it on the project's repo
+3. Create the labels: `"$PKG/bin/autopilot.sh" labels`
+   - on a new repo, `labels --prune`: it also removes GitHub's default labels (`bug`, `enhancement`, …), so people and
+     the classifier pick from the same list
+4. The GitHub App the agents act as
+   - the owner already has one for another project: install it on this repo too (one installed on all the owner's
+     repos already covers it), and reuse its id and key
+   - otherwise **this is the one step that needs the owner's clicks**; ask them for it, with this list
+     - https://github.com/settings/apps/new (or the org's): any name, no webhook
+     - repository permissions: Contents, Issues, Pull requests, Workflows — Read and write; Actions, Checks — Read;
+       Commit statuses — Read, only when checks report as commit statuses (some self-hosted mirrors)
+     - create it, generate a private key, install it on the project's repo
    - then you: `gh variable set AGENT_APP_ID --body <app id>` and `gh secret set AGENT_APP_KEY < <key.pem>`
 5. The model's token: `claude setup-token` (opens the owner's browser, valid a year), then
    `gh secret set CLAUDE_CODE_OAUTH_TOKEN` with what it printed. Never write it to a file in the repo
@@ -60,11 +83,15 @@ Run from the project's root, with `gh` signed in as the owner.
      (a GitHub App can't reach a user-owned project)
    - a review list: an issue whose body holds the line `<!-- review-list -->`; its number in `REVIEW_LIST`
    - auto-release: the project's release workflow listens for `repository_dispatch` of type `release`
-7. Commit on a branch, open a PR, merge it into `BASE`
+7. Read the project's `CLAUDE.md` / `AGENTS.md` as a runner would: steps it can't do there (a local skill, a dev server,
+   a deploy, a path on someone's machine) get one line saying what agents do instead
+8. Commit on a branch, open a PR into `BASE`, and merge it yourself
+   - no judge runs on it: `judge.yml` isn't on the default branch until this PR lands
+   - leave `Closes #N` out of its body: no issue is the ask yet
 
 **Done when** an issue opened by the owner (say "Docs: add a line to the README saying hello") gets labelled within a few
 minutes, gets an `@claude fix` comment from the app, then a draft PR that turns ready, then a `### Judge:` card, and
-merges. Watch it under the repo's Actions tab. If a step stalls, its run log says why.
+merges. Watch it under the repo's Actions tab, or the mirror's run list. If a step stalls, its run log says why.
 
 ## Customize
 
@@ -90,9 +117,11 @@ Reach for the first rung that does the job; each later rung costs more to keep:
 Whatever none of these can do is a package change: § Move a customization into the package.
 
 Try a change before merging it: run the script by hand from the project root with `DRY=1`, which prints every write
-instead of doing it, e.g. `DRY=1 /tmp/autopilot/bin/autopilot.sh dispatch`, or
-`/tmp/autopilot/bin/autopilot.sh prompt judge PR=1 SHA=abc` to read the judge's full prompt with the project's addition.
-(`dispatch`, `sweep`, `lock` and `release` still take and drop their lock ref under `refs/locks/`.)
+instead of doing it (once the callers are on `BASE`: `dispatch` counts the runs of `claude.yml` there), e.g. `DRY=1 "$PKG/bin/autopilot.sh" dispatch`, or
+`"$PKG/bin/autopilot.sh" prompt judge PR=1 SHA=abc` to read the judge's full prompt with the project's addition
+(`$PKG`: a package clone, § Set up step 1).
+A dry run still writes one thing: `dispatch`, `sweep`, `lock` and `release` take and drop their lock ref under
+`refs/locks/`.
 
 ## Move a customization into the package
 
@@ -103,7 +132,9 @@ above. Leave it local when it names the project's own files, services or rules.
    setting with a default in the list at the top of `bin/autopilot.sh` (add it to `SETTINGS` so `env` exports it), a
    new input with a default, or new prompt text that is true for every project
 2. Point the project at the branch: in its three callers, `@v1` → `@<branch>`. Run the flow once on a test issue; the
-   `.autopilot` checkout follows the caller's ref, so script and prompts come from the branch too
+   `.autopilot` checkout follows the caller's ref, so script and prompts come from the branch too. Not on a mirror that
+   doesn't fill `job.workflow_sha`: it checks out `v1`, so test a package branch on a project that runs on GitHub
+   Actions
 3. Open a PR on `Leo486597/autopilot` with what changed, why, and the run that proves it
 4. Once merged, release it: § Versions and updates
 5. In the project: callers back to `@v1`, and delete the local version (the prompt addition, the hook, the setting it
@@ -123,9 +154,7 @@ The project already runs its own triage / worker / judge workflows and script (t
    a setting you missed or a real change; say which in the PR
 3. Replace its workflows with the three callers (keep the file names), delete its own script and copied prompt text in
    the same PR, and point every doc that named them at this package
-4. If the project's workflows run on a self-hosted mirror rather than GitHub Actions: the mirror may not fill
-   `job.workflow_repository` / `job.workflow_sha`; the workflows then check out the package at `v1`. Check one run's
-   `.autopilot` checkout step to see which ref it took
+4. Workflows on a self-hosted mirror: § Set up says what changes
 
 **Done when** the old workflows and script are deleted, the dry-run diff is explained in the PR, and one issue has gone
 from opened to merged on the new flow.

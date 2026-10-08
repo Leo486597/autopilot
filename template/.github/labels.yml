@@ -1,5 +1,5 @@
 # The only labels this repo uses. One JSON object per line, so it is YAML and JSON at once.
-# `.autopilot/bin/autopilot.sh labels` makes GitHub match this file; `--prune` also deletes labels that aren't here.
+# The package's `bin/autopilot.sh labels` makes GitHub match this file; `--prune` also deletes labels that aren't here.
 #
 # family kind:     exactly one per issue
 # family priority: exactly one per issue

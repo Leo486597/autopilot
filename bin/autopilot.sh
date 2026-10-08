@@ -120,7 +120,10 @@ claimed() {
 
 dispatch() {
   local open=${1:-$(open_issues)} free n waiting=()
-  free=$(( AT_ONCE - $(gh run list -R "$REPO" --workflow claude.yml --limit 100 --json status --jq '[.[] | select(.status != "completed")] | length') ))
+  local running
+  running=$(gh run list -R "$REPO" --workflow claude.yml --limit 100 --json status --jq '[.[] | select(.status != "completed")] | length') \
+    || { echo "dispatch: can't list the runs of claude.yml on $REPO: is it on the default branch yet?" >&2; return 1; }
+  free=$(( AT_ONCE - running ))
   echo "dispatch: $free of $AT_ONCE free now" >&2
   # Resume a worker the owner answered; start one on an unassigned buildable issue with no sub-issues, not waiting on the
   # owner, unclaimed, not running, and tried fewer than twice
@@ -496,6 +499,9 @@ case "${1:-}" in
   update-check) update_check ;;
   prompt) shift; prompt "$@" ;;
   env) for k in $SETTINGS; do printf '%s=%s\n' "$k" "${!k}"; done ;;
-  init) cp -Rn "$HERE/template/." . || true; echo "init: starter files copied; fill in .github/autopilot.env and the three workflows (AGENTS.md § Set up)" ;;
+  init) (cd "$HERE/template" && find . -type f) | while read -r f; do
+          if [[ -e "$f" ]]; then echo "init: kept $f, already there: merge it by hand"
+          else mkdir -p "$(dirname "$f")" && cp "$HERE/template/$f" "$f" && echo "init: added $f"; fi
+        done ;;
   *) sed -n '2,20p' "$0"; exit 64 ;;
 esac
