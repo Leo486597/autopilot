@@ -140,6 +140,7 @@ from opened to merged on the new flow.
   - the daily sweep compares the project's `uses:` lines with the package's latest release
     (`autopilot.sh update-check`), and opens the issue "Autopilot: move to v2"
   - the project's own worker builds that issue from the release notes; its judge checks it like any PR
+  - one issue per major, ever: closing it declines the move, reopening it brings it back
 - Releasing the package
   - patch: a fix; minor: something new that changes nothing for a project that sets nothing; major: anything else
   - push the tag: `git tag v1.4.0 && git push origin v1.4.0`. `release.yml` publishes the release with notes from the

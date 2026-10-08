@@ -180,7 +180,7 @@ update_check() {
   latest=$(gh api "repos/$PACKAGE/releases/latest" --jq .tag_name | sed -E 's/^v([0-9]+).*/\1/') || return 0   # no release yet
   (( latest > used )) || return 0
   title="Autopilot: move to v$latest"
-  [[ -z $(gh issue list -R "$REPO" --state open --search "in:title \"$title\"" --json number --jq '.[].number') ]] || return 0
+  [[ -z $(gh issue list -R "$REPO" --state all --search "in:title \"$title\"" --json number --jq '.[].number') ]] || return 0
   run gh issue create -R "$REPO" --title "$title" --body "This project's workflows call $PACKAGE v$used; v$latest is out.
 Move the project to it: the \`uses:\` lines in \`.github/workflows/\`, and whatever the release notes say a project must change.
 Release notes: https://github.com/$PACKAGE/releases"
