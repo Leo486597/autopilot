@@ -1,0 +1,70 @@
+# The worker: `@claude` at the start of a comment, PR review or new issue, written by the owner or the agent's app, starts a
+# full Claude Code session on that thread. Called by a project's own .github/workflows/claude.yml (template/). It must
+# *begin* with `@claude`: a reply that quotes it must not restart it. No concurrency group: GitHub keeps only one waiting
+# run per group and cancels the rest, so two quick requests on one thread would lose one.
+name: autopilot worker
+on:
+  workflow_call:
+    inputs:
+      bot: { type: string, required: true, description: "slug of the GitHub App the agents act as, without [bot]" }
+      app-id: { type: string, required: true, description: "that app's id" }
+      owner: { type: string, default: "", description: "login the agents work for; empty: the repo owner" }
+      node-version: { type: string, default: "", description: "set up this Node version first; empty: the runner's" }
+      effort: { type: string, default: "high" }
+    secrets:
+      AGENT_APP_KEY: { required: true }
+      CLAUDE_CODE_OAUTH_TOKEN: { required: true }
+env:
+  OWNER: ${{ inputs.owner || github.repository_owner }}
+  BOT: ${{ inputs.bot }}
+jobs:
+  claude:
+    if: >-
+      ((github.event.comment.user.login || github.event.review.user.login || github.event.issue.user.login) == (inputs.owner || github.repository_owner) ||
+       (github.event.comment.user.login || github.event.review.user.login || github.event.issue.user.login) == format('{0}[bot]', inputs.bot)) &&
+      startsWith(github.event.comment.body || github.event.review.body || github.event.issue.body, '@claude')
+    runs-on: ubuntu-latest
+    timeout-minutes: 50   # the app's token lasts an hour
+    permissions:   # everything on GitHub goes through the app's token; the job's own token only reads
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: app
+        with: { app-id: "${{ inputs.app-id }}", private-key: "${{ secrets.AGENT_APP_KEY }}" }
+      - run: echo "GH_TOKEN=${{ steps.app.outputs.token }}" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app.outputs.token }}   # a push as the app starts the project's checks (GITHUB_TOKEN's wouldn't)
+      - uses: actions/checkout@v4   # this package, at the commit that defines this workflow
+        with: { repository: "${{ job.workflow_repository || 'Leo486597/autopilot' }}", ref: "${{ job.workflow_sha || 'v1' }}", path: .autopilot, persist-credentials: false }
+      - name: Keep the package out of the worker's commits, load the settings
+        run: |
+          echo /.autopilot/ >> .git/info/exclude
+          .autopilot/bin/autopilot.sh env >> "$GITHUB_ENV"
+          echo "BOT_ID=$(gh api "users/${BOT}[bot]" --jq .id)" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@v4
+        if: inputs.node-version != ''
+        with: { node-version: "${{ inputs.node-version }}" }
+      - if: env.WORKER_SETUP != ''
+        run: ${{ env.WORKER_SETUP }}
+      - id: prompt
+        run: |
+          { echo 'text<<__AUTOPILOT_END__'; .autopilot/bin/autopilot.sh prompt system; echo '__AUTOPILOT_END__'; } >> "$GITHUB_OUTPUT"
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ steps.app.outputs.token }}
+          additional_permissions: |
+            actions: read
+          allowed_bots: ${{ inputs.bot }}   # the dispatcher's `@claude fix` comes from the app
+          bot_id: ${{ env.BOT_ID }}         # commits show as the app
+          bot_name: ${{ inputs.bot }}[bot]
+          base_branch: ${{ env.BASE }}
+          branch_name_template: "{{prefix}}{{entityNumber}}-{{description}}"
+          claude_args: |
+            --model ${{ env.MODEL }}
+            --effort ${{ inputs.effort }}
+            --dangerously-skip-permissions
+            --append-system-prompt "${{ steps.prompt.outputs.text }}"

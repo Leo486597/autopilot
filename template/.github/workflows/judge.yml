@@ -1,0 +1,22 @@
+# The judge: checks each ready PR against its issue, merges a PASS: https://github.com/Leo486597/autopilot
+name: judge
+concurrency:
+  group: judge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true   # a newer commit makes the running verdict stale
+on:
+  pull_request_target:
+    types: [opened, ready_for_review, synchronize]
+    branches: [main]         # BASE in .github/autopilot.env
+permissions:
+  contents: read
+  actions: read
+jobs:
+  autopilot:
+    uses: Leo486597/autopilot/.github/workflows/judge.yml@v1
+    with:
+      bot: your-agent
+      app-id: ${{ vars.AGENT_APP_ID }}
+    secrets:
+      AGENT_APP_KEY: ${{ secrets.AGENT_APP_KEY }}
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}

@@ -1,0 +1,167 @@
+# The classifier and the plain steps around it, called by a project's own .github/workflows/triage.yml (template/).
+# On a new issue, on each comment the owner leaves, or when the sweep asks, a model sets the title and labels. Then a plain
+# script starts workers on issues that don't wait on the owner. Once a day the sweep lets go of idle P3s, classifies what has
+# no kind and starts workers. Only the owner's comments start the classifier, and not those that start like an agent's
+# (`@claude`, `<!-- agent -->`, claude-code-action's progress comment). An issue assigned to someone is left alone.
+name: autopilot triage
+on:
+  workflow_call:
+    inputs:
+      bot: { type: string, required: true, description: "slug of the GitHub App the agents act as, without [bot]" }
+      app-id: { type: string, required: true, description: "that app's id" }
+      owner: { type: string, default: "", description: "login the agents work for; empty: the repo owner" }
+      issue: { type: string, default: "", description: "issue to classify; empty runs the daily sweep" }
+    secrets:
+      AGENT_APP_KEY: { required: true }
+      CLAUDE_CODE_OAUTH_TOKEN: { required: true }
+      PROJECT_TOKEN: { required: false }
+env:
+  OWNER: ${{ inputs.owner || github.repository_owner }}
+  BOT: ${{ inputs.bot }}
+jobs:
+  classify:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.issue != '') ||
+      (github.event_name == 'issues' && github.event.action == 'opened' && toJSON(github.event.issue.assignees) == '[]' &&
+       (github.event.issue.user.login == (inputs.owner || github.repository_owner) ||
+        github.event.issue.user.login == format('{0}[bot]', inputs.bot)) &&
+       !startsWith(github.event.issue.body, '@claude')) ||
+      (github.event_name == 'issue_comment' && !github.event.issue.pull_request &&
+       github.event.issue.state == 'open' && toJSON(github.event.issue.assignees) == '[]' &&
+       github.event.comment.user.login == (inputs.owner || github.repository_owner) &&
+       !startsWith(github.event.comment.body, '@claude') &&
+       !contains(github.event.comment.body, '<!-- agent -->') &&
+       !contains(github.event.comment.body, 'Claude Code is working') &&
+       !startsWith(github.event.comment.body, '**Claude'))
+    concurrency:   # queue, never cancel: a run in progress must reach its own dispatch step
+      group: classify-${{ github.event.issue.number || inputs.issue }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:   # everything on GitHub goes through the app's token; the job's own token only reads
+      contents: read
+    env:
+      ISSUE: ${{ github.event.issue.number || inputs.issue }}
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: app
+        with: { app-id: "${{ inputs.app-id }}", private-key: "${{ secrets.AGENT_APP_KEY }}" }
+      - run: echo "GH_TOKEN=${{ steps.app.outputs.token }}" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4   # this package, at the commit that defines this workflow
+        with: { repository: "${{ job.workflow_repository || 'Leo486597/autopilot' }}", ref: "${{ job.workflow_sha || 'v1' }}", path: .autopilot, persist-credentials: false }
+      - run: .autopilot/bin/autopilot.sh env >> "$GITHUB_ENV"
+      - id: prompt
+        run: |
+          { echo 'text<<__AUTOPILOT_END__'; .autopilot/bin/autopilot.sh prompt classify N="$ISSUE"; echo '__AUTOPILOT_END__'; } >> "$GITHUB_OUTPUT"
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_bots: ${{ inputs.bot }}
+          github_token: ${{ steps.app.outputs.token }}
+          prompt: ${{ steps.prompt.outputs.text }}
+          claude_args: |
+            --model ${{ env.MODEL }}
+            --effort low
+            --allowedTools "Read,Bash(gh issue view:*),Bash(gh issue edit:*),Bash(gh api repos/${{ github.repository }}/milestones:*)"
+
+  dispatch:
+    needs: classify
+    if: ${{ !cancelled() && (needs.classify.result == 'success' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion != 'skipped')) }}
+    # One dispatcher at a time: the script holds a lock and a newer one waits for it. Not a concurrency group, which
+    # would cancel every pending dispatcher but the newest.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: app
+        with: { app-id: "${{ inputs.app-id }}", private-key: "${{ secrets.AGENT_APP_KEY }}" }
+      - run: echo "GH_TOKEN=${{ steps.app.outputs.token }}" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with: { repository: "${{ job.workflow_repository || 'Leo486597/autopilot' }}", ref: "${{ job.workflow_sha || 'v1' }}", path: .autopilot, persist-credentials: false }
+      - run: .autopilot/bin/autopilot.sh dispatch
+      - run: .autopilot/bin/autopilot.sh board
+        continue-on-error: true   # a board hiccup never fails the run
+
+  sweep:
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.issue == '')
+    runs-on: ubuntu-latest   # its dispatch waits on the same lock
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: app
+        with: { app-id: "${{ inputs.app-id }}", private-key: "${{ secrets.AGENT_APP_KEY }}" }
+      - run: echo "GH_TOKEN=${{ steps.app.outputs.token }}" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with: { repository: "${{ job.workflow_repository || 'Leo486597/autopilot' }}", ref: "${{ job.workflow_sha || 'v1' }}", path: .autopilot, persist-credentials: false }
+      - run: .autopilot/bin/autopilot.sh sweep
+      - run: .autopilot/bin/autopilot.sh board
+        continue-on-error: true
+
+  board:   # a closed issue's card is archived, a reopened one gets its Stage back
+    if: github.event_name == 'issues' && github.event.action != 'opened'
+    concurrency: board-${{ github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    env:
+      PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: app
+        with: { app-id: "${{ inputs.app-id }}", private-key: "${{ secrets.AGENT_APP_KEY }}" }
+      - run: echo "GH_TOKEN=${{ steps.app.outputs.token }}" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with: { repository: "${{ job.workflow_repository || 'Leo486597/autopilot' }}", ref: "${{ job.workflow_sha || 'v1' }}", path: .autopilot, persist-credentials: false }
+      - run: .autopilot/bin/autopilot.sh board
+        continue-on-error: true
+
+  unconflict:   # a ready PR that a merge into BASE left conflicting gets its worker to merge BASE in
+    if: github.event_name == 'push'
+    concurrency: unconflict-${{ github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: app
+        with: { app-id: "${{ inputs.app-id }}", private-key: "${{ secrets.AGENT_APP_KEY }}" }
+      - run: echo "GH_TOKEN=${{ steps.app.outputs.token }}" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with: { repository: "${{ job.workflow_repository || 'Leo486597/autopilot' }}", ref: "${{ job.workflow_sha || 'v1' }}", path: .autopilot, persist-credentials: false }
+      - run: .autopilot/bin/autopilot.sh unconflict
+
+  release:   # refresh each locked milestone's list on its release ticket; the last close or merge in one fires `release`
+    # No pull_request trigger: it would run a PR's own edited files with the owner's token, before the judge has seen it
+    if: >-
+      (github.event_name == 'issues' && github.event.action == 'closed') ||
+      github.event_name == 'push' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    env:
+      PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: app
+        with: { app-id: "${{ inputs.app-id }}", private-key: "${{ secrets.AGENT_APP_KEY }}" }
+      - run: echo "GH_TOKEN=${{ steps.app.outputs.token }}" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with: { repository: "${{ job.workflow_repository || 'Leo486597/autopilot' }}", ref: "${{ job.workflow_sha || 'v1' }}", path: .autopilot, persist-credentials: false }
+      - run: .autopilot/bin/autopilot.sh release
