@@ -10,6 +10,7 @@ Pick your branch:
 - **Customize** — the project runs autopilot and wants it to behave differently → § Customize
 - **Upstream** — a customization would help every project → § Move a customization into the package
 - **Migrate** — the project already runs its own hand-made copy of this flow → § Migrate a hand-made flow
+- **Update** — a new package version is out, or you are releasing one → § Versions and updates
 
 ## What lives where
 
@@ -104,8 +105,7 @@ above. Leave it local when it names the project's own files, services or rules.
 2. Point the project at the branch: in its three callers, `@v1` → `@<branch>`. Run the flow once on a test issue; the
    `.autopilot` checkout follows the caller's ref, so script and prompts come from the branch too
 3. Open a PR on `Leo486597/autopilot` with what changed, why, and the run that proves it
-4. Once merged, release it: tag `v1.<minor>.<patch>`, then move `v1` to it
-   (`git tag -f v1 && git push -f origin v1`). A change that breaks existing callers is `v2`, never a moved `v1`
+4. Once merged, release it: § Versions and updates
 5. In the project: callers back to `@v1`, and delete the local version (the prompt addition, the hook, the setting it
    replaced) in the same PR
 
@@ -129,3 +129,20 @@ The project already runs its own triage / worker / judge workflows and script (t
 
 **Done when** the old workflows and script are deleted, the dry-run diff is explained in the PR, and one issue has gone
 from opened to merged on the new flow.
+
+## Versions and updates
+
+- A project calls the package at a major tag, `@v1`
+  - every `v1.x.y` release moves `v1`, so the project runs it on its next workflow run, with no change of its own
+  - the script and prompts come from the same commit as the workflow (`job.workflow_sha`), so they never mix versions
+  - a runner that doesn't fill `job.workflow_sha` (some self-hosted mirrors) checks out `v1`: same result for `@v1`
+- A new major (`v2`) changes what a project must hold: a caller input, a setting, a label
+  - the daily sweep compares the project's `uses:` lines with the package's latest release
+    (`autopilot.sh update-check`), and opens the issue "Autopilot: move to v2"
+  - the project's own worker builds that issue from the release notes; its judge checks it like any PR
+  - one issue per major, ever: closing it declines the move, reopening it brings it back
+- Releasing the package
+  - patch: a fix; minor: something new that changes nothing for a project that sets nothing; major: anything else
+  - push the tag: `git tag v1.4.0 && git push origin v1.4.0`. `release.yml` publishes the release with notes from the
+    merged PRs and moves `v1` to it
+  - a major's release notes say, step by step, what a project must change: that text is the worker's brief

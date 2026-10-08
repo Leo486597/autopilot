@@ -11,6 +11,7 @@
 #   autopilot.sh review <pr>        add a merged PR to the review list by hand (REVIEW_LIST)
 #   autopilot.sh lock <issue>       lock the release ticket's milestone: it takes every open PR with no milestone
 #   autopilot.sh release            refresh each locked milestone's list on its ticket; once all are closed, fire `release`
+#   autopilot.sh update-check       open an issue when PACKAGE has a newer major than the project's workflows call
 #   autopilot.sh labels [--prune]   make GitHub's labels match .github/labels.yml; --prune deletes the ones not in it
 #   autopilot.sh prompt <name> K=V  print prompts/<name>.md plus the project's .github/autopilot/<name>.md, {{K}} filled in
 #   autopilot.sh env                print the settings as KEY=value lines, for $GITHUB_ENV
@@ -37,9 +38,10 @@ REPO=${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner --jq .nameWithOwne
 : "${MODEL:=claude-opus-5-5}"
 : "${JUDGE_PREPARE:=}"                    # command run from BASE before the judge; it may write files the judge reads
 : "${WORKER_SETUP:=}"                     # command run before the worker starts
+: "${PACKAGE:=Leo486597/autopilot}"       # where the shared workflows come from; the sweep checks it for a newer major
 export REPO OWNER BASE NEEDS_LABEL BUILDABLE
 SETTINGS="OWNER BASE NEEDS_LABEL BUILDABLE AT_ONCE CLASSIFY_PER_DAY IDLE_DAYS REVIEW_LIST CHECKS_WORKFLOW REQUIRED_CHECK
-  BOARD_PROJECTS BOARD_ROUTE MODEL JUDGE_PREPARE WORKER_SETUP"
+  BOARD_PROJECTS BOARD_ROUTE MODEL JUDGE_PREPARE WORKER_SETUP PACKAGE"
 
 MARK='<!-- agent -->'
 LOCK=locks/dispatch  # a ref only one dispatcher holds: the refs API refuses to create one that exists
@@ -165,7 +167,24 @@ Closed: all its sub-issues are done. Reopen it if something is left."
     run owner_gh workflow run triage.yml -R "$REPO" -f issue="$n"
   done
 
+  update_check
   locked dispatch   # reads the issues again inside the lock: another dispatcher may have started one since
+}
+
+# A newer minor reaches the project by itself (its workflows call @v<major>, which each release moves); a newer major
+# changes what the project must hold, so it becomes an issue the worker builds from the release notes
+update_check() {
+  local used latest title
+  used=$(grep -ho "$PACKAGE/\.github/workflows/[a-z-]*\.yml@v[0-9]*" .github/workflows/*.yml | sed 's/.*@v//' | sort -n | head -1 || true)
+  [[ -n "$used" ]] || return 0
+  latest=$(gh api "repos/$PACKAGE/releases/latest" --jq .tag_name | sed -E 's/^v([0-9]+).*/\1/') || return 0   # no release yet
+  (( latest > used )) || return 0
+  title="Autopilot: move to v$latest"
+  [[ -z $(gh issue list -R "$REPO" --state all --search "in:title \"$title\"" --json number --jq '.[].number') ]] || return 0
+  run gh issue create -R "$REPO" --title "$title" --body "This project's workflows call $PACKAGE v$used; v$latest is out.
+Move the project to it: the \`uses:\` lines in \`.github/workflows/\`, and whatever the release notes say a project must change.
+Release notes: https://github.com/$PACKAGE/releases"
+  echo "update-check: v$used → v$latest, issue opened" >&2
 }
 
 # The project an issue's card belongs on: BOARD_ROUTE's when a label matches it, else the first of BOARD_PROJECTS
@@ -474,6 +493,7 @@ case "${1:-}" in
   lock) LOCK=locks/release locked lock "$2" ;;
   release) LOCK=locks/release locked release ;;
   labels) labels "${2:-}" ;;
+  update-check) update_check ;;
   prompt) shift; prompt "$@" ;;
   env) for k in $SETTINGS; do printf '%s=%s\n' "$k" "${!k}"; done ;;
   init) cp -Rn "$HERE/template/." . || true; echo "init: starter files copied; fill in .github/autopilot.env and the three workflows (AGENTS.md § Set up)" ;;
