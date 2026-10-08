@@ -1,141 +1,22 @@
-# The judge: a fresh agent that didn't write the PR checks it against what was asked, so the owner reads its card instead
-# of the code. Called by a project's own .github/workflows/judge.yml (template/) on pull_request_target, so this
-# workflow, its prompt and the project's judge additions come from BASE, never from the PR being judged; the PR's code is
-# checked out into pr/ and only read. PASS posts the card and merges; UNSURE asks three fresh voters, and 2 of 3 merge, else
-# it goes to the owner; FAIL on an agent's PR (branch claude/…) puts it back to draft and hands the findings to its worker
-# through `@claude` up to twice, and a third FAIL goes to the owner; a FAIL on anyone else's PR stays on the PR.
-name: autopilot judge
+# The judge: checks each ready PR against its issue, merges a PASS: https://github.com/Leo486597/autopilot
+name: judge
+concurrency:
+  group: judge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true   # a newer commit makes the running verdict stale
 on:
-  workflow_call:
-    inputs:
-      bot: { type: string, required: true, description: "slug of the GitHub App the agents act as, without [bot]" }
-      app-id: { type: string, required: true, description: "that app's id" }
-      owner: { type: string, default: "", description: "login the agents work for; empty: the repo owner" }
-      skip-branch-prefix: { type: string, default: "", description: "PRs from branches starting with this aren't judged" }
-    secrets:
-      AGENT_APP_KEY: { required: true }
-      CLAUDE_CODE_OAUTH_TOKEN: { required: true }
-      PROJECT_TOKEN: { required: false }
-env:
-  OWNER: ${{ inputs.owner || github.repository_owner }}
-  BOT: ${{ inputs.bot }}
-  PR: ${{ github.event.pull_request.number }}
-  SHA: ${{ github.event.pull_request.head.sha }}
+  pull_request_target:
+    types: [opened, ready_for_review, synchronize]
+    branches: [main]         # BASE in .github/autopilot.env
+permissions:
+  contents: read
+  actions: read
 jobs:
-  judge:
-    if: >-
-      (github.event.pull_request.user.login == (inputs.owner || github.repository_owner) ||
-       github.event.pull_request.user.login == format('{0}[bot]', inputs.bot)) &&
-      !github.event.pull_request.draft &&
-      (inputs.skip-branch-prefix == '' || !startsWith(github.event.pull_request.head.ref, inputs.skip-branch-prefix))
-    outputs:
-      next: ${{ steps.settle.outputs.next }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:   # everything on GitHub goes through the app's token; the job's own token only reads
-      contents: read
-    steps:
-      - uses: actions/create-github-app-token@v2
-        id: app
-        with: { app-id: "${{ inputs.app-id }}", private-key: "${{ secrets.AGENT_APP_KEY }}" }
-      - run: echo "GH_TOKEN=${{ steps.app.outputs.token }}" >> "$GITHUB_ENV"
-      - run: echo "SINCE=$(date -u +%FT%TZ)" >> "$GITHUB_ENV"   # only a card posted by this run counts
-      - uses: actions/checkout@v4   # BASE: the project's settings and judge additions
-      - uses: actions/checkout@v4
-        with: { ref: "${{ github.event.pull_request.head.sha }}", path: pr, persist-credentials: false }
-      - uses: actions/checkout@v4   # this package, at the commit that defines this workflow
-        with: { repository: "${{ job.workflow_repository || 'Leo486597/autopilot' }}", ref: "${{ job.workflow_sha || 'v1' }}", path: .autopilot, persist-credentials: false }
-      - run: .autopilot/bin/autopilot.sh env >> "$GITHUB_ENV"
-      - name: Wait for this commit's checks
-        run: .autopilot/bin/autopilot.sh wait-checks "$SHA"
-      - name: Run the project's judge preparation, from BASE
-        if: env.JUDGE_PREPARE != ''
-        run: ${{ env.JUDGE_PREPARE }}
-      - id: prompt
-        run: |
-          { echo 'text<<__AUTOPILOT_END__'; .autopilot/bin/autopilot.sh prompt judge; echo '__AUTOPILOT_END__'; } >> "$GITHUB_OUTPUT"
-      - uses: anthropics/claude-code-action@v1
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          allowed_bots: ${{ inputs.bot }}   # a worker's PR is the app's
-          github_token: ${{ steps.app.outputs.token }}
-          prompt: ${{ steps.prompt.outputs.text }}
-          claude_args: |
-            --model ${{ env.MODEL }}
-            --effort high
-            --allowedTools "Read,Glob,Grep,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*),Bash(gh pr comment:*),Bash(gh pr ready:*),Bash(gh issue view:*),Bash(gh issue edit:*),Bash(.autopilot/bin/autopilot.sh ping:*)"
-      - name: Merge on PASS, vote on UNSURE
-        id: settle
-        if: ${{ !cancelled() }}   # a crashed judge leaves no card, and settle tells the owner
-        run: echo "next=$(.autopilot/bin/autopilot.sh settle "$PR" "$SHA" "$SINCE")" >> "$GITHUB_OUTPUT"
-      - run: .autopilot/bin/autopilot.sh board
-        if: ${{ !cancelled() }}
-        continue-on-error: true   # a board hiccup must not skip the vote
-        env:
-          PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}   # set on this step only, kept from the model
-
-  vote:   # three fresh runs; each reads a copy of the PR taken before any vote, so none sees another's
-    needs: judge
-    if: needs.judge.outputs.next == 'vote'
-    strategy:
-      fail-fast: false   # one crashed voter counts as OWNER; the other two still vote
-      matrix:
-        voter: [1, 2, 3]
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/create-github-app-token@v2
-        id: app
-        with: { app-id: "${{ inputs.app-id }}", private-key: "${{ secrets.AGENT_APP_KEY }}" }
-      - run: echo "GH_TOKEN=${{ steps.app.outputs.token }}" >> "$GITHUB_ENV"
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with: { ref: "${{ github.event.pull_request.head.sha }}", path: pr, persist-credentials: false }
-      - uses: actions/checkout@v4
-        with: { repository: "${{ job.workflow_repository || 'Leo486597/autopilot' }}", ref: "${{ job.workflow_sha || 'v1' }}", path: .autopilot, persist-credentials: false }
-      - run: .autopilot/bin/autopilot.sh env >> "$GITHUB_ENV"
-      - name: Copy the PR, its issue and its diff, without any vote
-        run: |
-          R=$GITHUB_REPOSITORY
-          { gh pr view "$PR" -R "$R" --json title,body,comments --jq '"# \(.title)\n\n\(.body)\n\n## Comments\n\n"
-              + ([.comments[].body | select(test("### Vote [1-3]:") | not)] | join("\n\n---\n\n"))'
-            n=$(gh pr view "$PR" -R "$R" --json closingIssuesReferences --jq '.closingIssuesReferences[0].number // empty')
-            [ -z "$n" ] || { echo; echo "## Issue #$n"; gh issue view "$n" -R "$R" --comments; }
-            echo; echo "## Diff"; gh pr diff "$PR" -R "$R"
-          } > context.md
-      - id: prompt
-        run: |
-          { echo 'text<<__AUTOPILOT_END__'; .autopilot/bin/autopilot.sh prompt vote VOTER=${{ matrix.voter }}; echo '__AUTOPILOT_END__'; } >> "$GITHUB_OUTPUT"
-      - uses: anthropics/claude-code-action@v1
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          allowed_bots: ${{ inputs.bot }}
-          github_token: ${{ steps.app.outputs.token }}
-          prompt: ${{ steps.prompt.outputs.text }}
-          claude_args: |
-            --model ${{ env.MODEL }}
-            --effort high
-            --allowedTools "Read,Glob,Grep,Bash(gh pr comment:*)"
-
-  tally:  # 2 of 3 MERGE merges; anything else, a missing vote included, goes to the owner
-    needs: [judge, vote]
-    if: ${{ !cancelled() && needs.judge.outputs.next == 'vote' }}   # a newer commit cancels the round
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-    env:
+  autopilot:
+    uses: Leo486597/autopilot/.github/workflows/autopilot-judge.yml@main   # this repo runs its own latest
+    with:
+      bot: buylah-agent
+      app-id: ${{ vars.AGENT_APP_ID }}
+    secrets:
+      AGENT_APP_KEY: ${{ secrets.AGENT_APP_KEY }}
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
       PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
-    steps:
-      - uses: actions/create-github-app-token@v2
-        id: app
-        with: { app-id: "${{ inputs.app-id }}", private-key: "${{ secrets.AGENT_APP_KEY }}" }
-      - run: echo "GH_TOKEN=${{ steps.app.outputs.token }}" >> "$GITHUB_ENV"
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with: { repository: "${{ job.workflow_repository || 'Leo486597/autopilot' }}", ref: "${{ job.workflow_sha || 'v1' }}", path: .autopilot, persist-credentials: false }
-      - run: .autopilot/bin/autopilot.sh tally "$PR" "$SHA"
-      - run: .autopilot/bin/autopilot.sh board
-        continue-on-error: true

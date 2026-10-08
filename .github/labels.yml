@@ -1,0 +1,18 @@
+# The only labels this repo uses. One JSON object per line, so it is YAML and JSON at once.
+# `.autopilot/bin/autopilot.sh labels` makes GitHub match this file; `--prune` also deletes labels that aren't here.
+#
+# family kind:     exactly one per issue
+# family priority: exactly one per issue
+# family needs:    only when the issue waits on the owner's decision or action
+
+labels:
+  - {"name": "kind: feature", "color": "a2eeef", "description": "Something the product should do that it doesn't"}
+  - {"name": "kind: bug",     "color": "d73a4a", "description": "Something the product does wrong"}
+  - {"name": "kind: chore",   "color": "bfd4f2", "description": "Upkeep: infra, CI, docs, dependencies"}
+
+  - {"name": "priority: P0", "color": "b60205", "description": "Now: loses money, leaks data, or blocks a launch"}
+  - {"name": "priority: P1", "color": "d93f0b", "description": "Next: a user hits it on the main path"}
+  - {"name": "priority: P2", "color": "fbca04", "description": "Soon: real but has a workaround"}
+  - {"name": "priority: P3", "color": "c5def5", "description": "Later: nice to have; let go after 14 idle days"}
+
+  - {"name": "needs: owner", "color": "d876e3", "description": "Waits on the owner's decision or action"}

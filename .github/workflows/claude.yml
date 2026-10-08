@@ -14,9 +14,9 @@ permissions:
   actions: read
 jobs:
   autopilot:
-    uses: Leo486597/autopilot/.github/workflows/autopilot-worker.yml@v1
+    uses: Leo486597/autopilot/.github/workflows/autopilot-worker.yml@main   # this repo runs its own latest
     with:
-      bot: your-agent
+      bot: buylah-agent
       app-id: ${{ vars.AGENT_APP_ID }}
     secrets:
       AGENT_APP_KEY: ${{ secrets.AGENT_APP_KEY }}

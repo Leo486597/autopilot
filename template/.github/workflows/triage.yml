@@ -22,7 +22,7 @@ permissions:
   actions: read
 jobs:
   autopilot:
-    uses: Leo486597/autopilot/.github/workflows/triage.yml@v1
+    uses: Leo486597/autopilot/.github/workflows/autopilot-triage.yml@v1
     with:
       bot: your-agent      # your GitHub App's slug
       app-id: ${{ vars.AGENT_APP_ID }}

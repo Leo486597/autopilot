@@ -14,7 +14,7 @@ Pick your branch:
 ## What lives where
 
 - This package (`Leo486597/autopilot`), shared by every project
-  - `.github/workflows/{triage,worker,judge}.yml` — reusable workflows (`on: workflow_call`) holding all the logic
+  - `.github/workflows/autopilot-{triage,worker,judge}.yml` — reusable workflows (`on: workflow_call`) holding all the logic
   - `bin/autopilot.sh` — the plain steps with no model: dispatch, merge, vote count, board, release lock. `--help`-style
     usage is its header
   - `prompts/*.md` — what each agent is told; `{{KEY}}` is filled from the environment
