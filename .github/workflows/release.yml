@@ -1,0 +1,21 @@
+# Publish a release when a vX.Y.Z tag is pushed: notes from the merged PRs, and the vX tag moved to it, so every
+# project calling @vX runs the new version on its next run.
+name: release
+on:
+  push:
+    tags: ["v*.*.*"]
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" --verify-tag --generate-notes --title "$TAG"
+          git tag -f "${TAG%%.*}" HEAD
+          git push -f origin "${TAG%%.*}"
