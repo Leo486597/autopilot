@@ -36,4 +36,4 @@ flowchart TD
 the quickest path is to point yours at it: _"set up https://github.com/Leo486597/autopilot in this repo, following its
 AGENTS.md"_.
 
-Needs: a GitHub App for the agents to act as, and a Claude token (`claude setup-token`). MIT licence.
+Needs: a GitHub App for the agents to act as, and a Claude token (`claude setup-token`). [MIT licence](LICENSE).
