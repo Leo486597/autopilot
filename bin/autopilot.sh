@@ -38,10 +38,12 @@ REPO=${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner --jq .nameWithOwne
 : "${MODEL:=claude-opus-5-5}"
 : "${JUDGE_PREPARE:=}"                    # command run from BASE before the judge; it may write files the judge reads
 : "${WORKER_SETUP:=}"                     # command run before the worker starts
+: "${MERGE_METHOD:=merge}"                 # how a PR lands: merge | squash (one commit: PR title + body) | rebase
 : "${PACKAGE:=Leo486597/autopilot}"       # where the shared workflows come from; the sweep checks it for a newer major
+case "$MERGE_METHOD" in merge|squash|rebase) ;; *) echo "autopilot: MERGE_METHOD must be merge, squash or rebase (got '$MERGE_METHOD')" >&2; exit 2 ;; esac
 export REPO OWNER BASE NEEDS_LABEL BUILDABLE
 SETTINGS="OWNER BASE NEEDS_LABEL BUILDABLE AT_ONCE CLASSIFY_PER_DAY IDLE_DAYS REVIEW_LIST CHECKS_WORKFLOW REQUIRED_CHECK
-  BOARD_PROJECTS BOARD_ROUTE MODEL JUDGE_PREPARE WORKER_SETUP PACKAGE"
+  BOARD_PROJECTS BOARD_ROUTE MODEL JUDGE_PREPARE WORKER_SETUP MERGE_METHOD PACKAGE"
 
 MARK='<!-- agent -->'
 LOCK=locks/dispatch  # a ref only one dispatcher holds: the refs API refuses to create one that exists
@@ -330,7 +332,16 @@ Not merged yet: \`$BASE\` has $behind commits that ${sha:0:7} lacks, so its chec
       || to_owner "$pr" "didn't merge" "$BASE moved since its checks ran, and GitHub couldn't merge $BASE into the branch."
     return 1
   fi
-  run gh pr merge "$pr" -R "$REPO" --merge --match-head-commit "$sha" \
+  local how=(--merge) json
+  case "$MERGE_METHOD" in
+    merge) ;;
+    rebase) how=(--rebase) ;;
+    squash)
+      json=$(gh pr view "$pr" -R "$REPO" --json title,body) \
+        || { to_owner "$pr" "didn't merge" "GitHub wouldn't show the title and body for the squash commit."; return 1; }
+      how=(--squash --subject "$(jq -r .title <<<"$json") (#$pr)" --body "$(jq -r '.body // ""' <<<"$json" | tr -d '\r')") ;;
+  esac
+  run gh pr merge "$pr" -R "$REPO" "${how[@]}" --match-head-commit "$sha" \
     || { to_owner "$pr" "didn't merge" "GitHub refused the merge: a conflict, or a newer commit than the judged one."; return 1; }
 }
 
